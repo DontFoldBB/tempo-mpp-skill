@@ -62,7 +62,7 @@ cat > "$SESSION" <<EOF
 PROJECT_DIR=${PROJECT_DIR:-}
 RECIPIENT=${RECIPIENT:-}
 SLUG=${SLUG:-}
-PRICE_UNITS=${PRICE_UNITS:-}
+PRICE=${PRICE:-}
 SECRET=${SECRET:-}
 PROD_URL=${PROD_URL:-}
 EOF
@@ -116,7 +116,7 @@ Capture into the session file:
 
 - `SLUG` — short kebab-case identifier (e.g. `tempo-token-info`)
 - `IDEA_KEY` — single letter A–F so later steps know which template to use
-- `PRICE_UNITS` — in base units of USDC.e (6 decimals): `10000` = $0.01, `5000` = $0.005, `20000` = $0.02
+- `PRICE` — decimal string in USDC.e tokens (NOT base units). Examples: `'0.01'`, `'0.005'`, `'0.02'`. The mppx library handles the 6-decimal conversion internally — passing `'10000'` would mean **ten thousand USDC.e**, not one cent.
 
 Once captured, confirm to the user in one line what's queued up.
 
@@ -192,7 +192,7 @@ If any install fails — most often a registry timeout — retry once before bai
 
 ## B3. Secret generation
 
-USDC.e amounts use 6 decimals, so prices are expressed in base units. The MPP secret must be exactly 64 hex characters. `randomBytes(32).toString('hex')` occasionally returns 63 chars when the leading byte is zero — regenerate until length matches.
+The MPP secret must be exactly 64 hex characters. `randomBytes(32).toString('hex')` occasionally returns 63 chars when the leading byte is zero — regenerate until length matches.
 
 ```bash
 while :; do
@@ -265,8 +265,9 @@ export const mppx = Mppx.create({
   ],
 })
 
-export const PRICE_UNITS = process.env.PRICE_UNITS || '10000'
-export const PRICE_DISPLAY = (Number(PRICE_UNITS) / 1_000_000).toFixed(2)
+// PRICE is a decimal string in USDC.e tokens, NOT base units.
+// '0.01' = one cent. mppx handles the 6-decimal conversion internally.
+export const PRICE = process.env.PRICE || '0.01'
 ```
 
 ### `lib/cache.ts`
@@ -279,29 +280,36 @@ export const responseCache = new LRUCache<string, object>({ max: 1000, ttl: 60_0
 
 ### `app/api/service/route.ts`
 
-Manual 402 flow (because we're on `mppx/server`, not the higher-level Next adapter):
+Manual 402 flow (because we're on `mppx/server`, not the higher-level Next adapter).
+
+**Critical ordering:** the payment middleware must run **before** input validation. The MPP spec requires that an unauthenticated request returns 402 with a `WWW-Authenticate: Payment` header regardless of request body validity — registries like MPPScan probe the endpoint without any params to discover pricing, and will reject the service if they get a 400 instead of a 402.
 
 ```ts
-import { mppx, PRICE_UNITS } from '@/lib/mpp'
+import { mppx, PRICE } from '@/lib/mpp'
 import { responseCache } from '@/lib/cache'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request): Promise<Response> {
-  // Validate inputs BEFORE charging — we never want to take money for a malformed request
-  const url = new URL(request.url)
-  const input = url.searchParams.get('q')
-  if (!input) {
-    return Response.json({ error: 'missing_parameter' }, { status: 400 })
-  }
-
-  // Run payment middleware
-  const charge = mppx.charge({ amount: PRICE_UNITS })
+  // 1. Payment middleware FIRST — must return 402 before any validation,
+  //    so MPPScan and agents can discover pricing on an empty request.
+  const charge = mppx.charge({ amount: PRICE })
   const result = await charge(request)
   if (result.status === 402) return result.challenge
 
-  // Cache hit
+  // 2. Payment confirmed — now validate inputs. Wrap any error response
+  //    with result.withReceipt() so the client gets proof of payment
+  //    even when the request itself is malformed.
+  const url = new URL(request.url)
+  const input = url.searchParams.get('q')
+  if (!input) {
+    return result.withReceipt(
+      Response.json({ error: 'missing_parameter' }, { status: 400 })
+    )
+  }
+
+  // 3. Cache hit
   const cacheKey = input.toLowerCase()
   const cached = responseCache.get(cacheKey)
   if (cached) {
@@ -310,7 +318,7 @@ export async function GET(request: Request): Promise<Response> {
     )
   }
 
-  // Cache miss — do the work
+  // 4. Cache miss — do the work
   try {
     const payload = await buildResponse(input)
     responseCache.set(cacheKey, payload)
@@ -335,9 +343,10 @@ Replace `buildResponse` with the body from `/tmp/mpp-ideas.md` matching `IDEA_KE
 
 ### `app/openapi.json/route.ts`
 
-MPPScan parses this file to register the service. Two requirements:
+MPPScan parses this file to register the service. Three requirements:
 1. `x-payment-info` must be a flat object — `{ intent, method, amount, currency, description }`. The nested `offers: [...]` form gets rejected.
 2. `servers[0].url` should resolve to the Vercel production URL at runtime — use `VERCEL_PROJECT_PRODUCTION_URL` first, fall back to `VERCEL_URL`, then to localhost for dev.
+3. **`amount` in `x-payment-info` must be in base units (integer string)**, not decimal — `'10000'` for $0.01, not `'0.01'`. This is the inverse of what `mppx.charge()` expects in the route handler, where amount is a decimal string. The code below handles the conversion via `Math.round(Number(PRICE) * 1_000_000)`.
 
 ```ts
 export const runtime = 'nodejs'
@@ -348,8 +357,12 @@ export async function GET(_req?: Request): Promise<Response> {
     (process.env.VERCEL_URL && `https://${process.env.VERCEL_URL}`) ||
     'http://localhost:3000'
 
-  const priceUnits = process.env.PRICE_UNITS || '10000'
-  const priceDisplay = (Number(priceUnits) / 1_000_000).toFixed(2)
+  // PRICE is decimal string from env (used by mppx.charge), but openapi requires
+  // base units (integer string in token units * 10^decimals). USDC.e has 6 decimals,
+  // so PRICE='0.01' becomes priceBaseUnits='10000' for the discovery document.
+  const PRICE = process.env.PRICE || '0.01'
+  const priceBaseUnits = Math.round(Number(PRICE) * 1_000_000).toString()
+  const priceDisplay = Number(PRICE).toFixed(PRICE.includes('.') ? PRICE.split('.')[1].length : 2)
 
   const doc = {
     openapi: '3.1.0',
@@ -373,7 +386,7 @@ export async function GET(_req?: Request): Promise<Response> {
           'x-payment-info': {
             intent: 'charge',
             method: 'tempo',
-            amount: priceUnits,
+            amount: priceBaseUnits,
             currency: '0x20c000000000000000000000b9537d11c60e8b50',
             description: `$${priceDisplay} per request`,
           },
@@ -483,9 +496,10 @@ ps -p $DEV_PID >/dev/null || { tail -30 /tmp/mpp-dev.log; echo "dev server faile
 Run four checks against `http://localhost:3000`:
 
 ```bash
-# 1) Missing param → 400
-curl -s -o /dev/null -w 'missing_param: HTTP %{http_code}\n' \
-  'http://localhost:3000/api/service'
+# 1) Empty request (no params) → 402 with WWW-Authenticate
+#    This is what MPPScan probes to discover pricing — must return 402, NOT 400.
+curl -s -i 'http://localhost:3000/api/service' | \
+  awk 'NR==1 || tolower($0) ~ /www-authenticate/'
 
 # 2) Valid request without payment → 402 with WWW-Authenticate
 curl -s -i 'http://localhost:3000/api/service?q=test' | \
@@ -508,12 +522,12 @@ curl -s -o /dev/null -w 'landing: HTTP %{http_code}\n' http://localhost:3000/
 ```
 
 Expected:
-- Check 1 prints `HTTP 400`
+- Check 1 prints `HTTP/... 402` with `WWW-Authenticate: Payment ...` (NOT 400 — payment middleware must run first)
 - Check 2 prints an `HTTP/... 402` line followed by `WWW-Authenticate: Payment ...`
 - Check 3 prints `flat (good)` and shows the amount/method
 - Check 4 prints `HTTP 200`
 
-If anything doesn't match, see failure modes — fix the issue and rerun this phase. **Don't proceed to deploy until all four pass.**
+If Check 1 returns 400 instead of 402, the handler has validation before `mppx.charge()` — this will cause MPPScan to reject the service. Fix the order in `app/api/service/route.ts` (charge first, validation after) and rerun.
 
 Stop the dev server:
 
@@ -613,7 +627,7 @@ Print a comprehensive summary so the user can poke around and see their work. Us
 
 Имя:           <SLUG>
 Идея:          <SERVICE_IDEA в одну строку>
-Цена:          $<PRICE_DISPLAY> USDC.e за запрос
+Цена:          $<PRICE> USDC.e за запрос
 Получатель:    <RECIPIENT>
 
 Куда зайти посмотреть:
@@ -757,7 +771,7 @@ Show the response to the user and explain:
 > 🎉 Платёж прошёл, агент получил ответ от твоего сервиса.
 >
 > Что произошло:
-> 1. Тестовый кошелёк (`<TEST_ADDRESS>`) заплатил $<PRICE_DISPLAY> USDC.e
+> 1. Тестовый кошелёк (`<TEST_ADDRESS>`) заплатил $<PRICE> USDC.e
 > 2. Деньги пришли на твой recipient `<RECIPIENT>`
 > 3. Сервис вернул JSON ответ (выше)
 >
@@ -766,15 +780,89 @@ Show the response to the user and explain:
 > - Vercel Logs: https://vercel.com/dashboard (запрос с 200 ответом)
 > - MPPScan (если зарегистрировал): на странице сервиса в Transactions
 
-Clean up test files (they contain a private key):
+Before deleting the test wallet files, sweep remaining balance back to the recipient — otherwise that $0.40+ is locked forever (test private key gets deleted). On Tempo gas is paid in stablecoins, so we send `balance - small reserve` to cover the transfer fee itself.
+
+Tell the user:
+
+> На тестовом кошельке ещё остались деньги ($0.40-0.90 после теста). Сейчас переведу их на твой основной recipient адрес, чтоб не потерялись.
 
 ```bash
-rm -f test-payment.ts test-call.ts test-call.ts.bak
+cd "$PROJECT_DIR"
+cat > sweep-test.ts <<EOF
+import { privateKeyToAccount } from 'viem/accounts'
+import { createWalletClient, createPublicClient, http, parseAbi, encodeFunctionData } from 'viem'
+import { defineChain } from 'viem'
+
+const tempo = defineChain({
+  id: 4217, name: 'Tempo',
+  nativeCurrency: { name: 'USD', symbol: 'USD', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc.tempo.xyz'] } }
+})
+
+const USDC_E = '0x20c000000000000000000000b9537d11c60e8b50' as \`0x\${string}\`
+const RECIPIENT = 'RECIPIENT_HERE' as \`0x\${string}\`
+const PK = 'TEST_PK_HERE' as \`0x\${string}\`
+
+const erc20Abi = parseAbi([
+  'function balanceOf(address) view returns (uint256)',
+  'function transfer(address to, uint256 amount) returns (bool)',
+])
+
+async function main() {
+  const account = privateKeyToAccount(PK)
+  const publicClient = createPublicClient({ chain: tempo, transport: http() })
+  const walletClient = createWalletClient({ account, chain: tempo, transport: http() })
+
+  const balance = await publicClient.readContract({
+    address: USDC_E, abi: erc20Abi, functionName: 'balanceOf', args: [account.address]
+  }) as bigint
+  console.log('Balance on test wallet:', Number(balance) / 1e6, 'USDC.e')
+
+  if (balance === 0n) {
+    console.log('Nothing to sweep')
+    return
+  }
+
+  // Reserve a small amount for gas on Tempo (~$0.005 in USDC.e base units = 5000)
+  const GAS_RESERVE = 5000n
+  if (balance <= GAS_RESERVE) {
+    console.log('Balance too small to sweep (would not cover gas)')
+    return
+  }
+  const sendAmount = balance - GAS_RESERVE
+
+  const hash = await walletClient.writeContract({
+    address: USDC_E, abi: erc20Abi, functionName: 'transfer',
+    args: [RECIPIENT, sendAmount],
+  })
+  console.log('Sweep tx:', hash)
+  console.log('Sent:', Number(sendAmount) / 1e6, 'USDC.e to', RECIPIENT)
+}
+main().catch(e => { console.error('Sweep failed:', e.message); process.exit(1) })
+EOF
+
+sed -i.bak "s|TEST_PK_HERE|$TEST_PK|" sweep-test.ts
+sed -i.bak "s|RECIPIENT_HERE|$RECIPIENT|" sweep-test.ts
+npx tsx sweep-test.ts 2>&1 | tail -10
+```
+
+If sweep succeeds, tell the user:
+
+> Перевёл оставшиеся средства на твой recipient `<RECIPIENT>`. Tx: `<sweep_hash>`. Можешь проверить в explorer.
+
+If sweep fails (RPC issue, gas problem) — don't block the flow, just tell the user:
+
+> Sweep не получилось ($<balance> остались на тестовом кошельке). Если хочешь их забрать позже, приватный ключ был: `<TEST_PK>`. Сохрани в надёжное место. Иначе они там и зависнут.
+
+Now clean up test files (they contain a private key):
+
+```bash
+rm -f test-payment.ts test-call.ts test-call.ts.bak sweep-test.ts sweep-test.ts.bak
 ```
 
 After cleanup, proceed directly to E4 (MPPScan registration). Don't return to E2 menu — payment test naturally leads into listing the service in the catalog. Just announce the next step and continue:
 
-> Платёж прошёл, сервис подтверждённо работает. Теперь самое время зарегистрировать его в каталоге MPPScan чтобы агенты могли найти автоматически.
+> Платёж прошёл, остаток вернул, теперь самое время зарегистрировать сервис в каталоге MPPScan чтобы агенты могли найти автоматически.
 
 Then continue with the E4 flow below.
 
@@ -786,7 +874,7 @@ Then continue with the E4 flow below.
 >
 > 1) Открой https://mppscan.com/register
 > 2) В поле Service URL введи: `https://<PROD_URL>` (это твой vercel.app URL)
-> 3) Жми **Register**
+> 3) Жми **+ Add Server**
 > 4) MPPScan сам прочитает твой `/openapi.json`, увидит все эндпоинты и цены, сделает запись в каталоге
 > 5) Получишь страницу вида `mppscan.com/server/<hash>` — это твоя карточка. Пришли её ссылку сюда, чтоб я добавил в саммари
 
@@ -832,6 +920,41 @@ End with a single line: `MPP_BUILD_DONE`. Downstream tooling looks for this exac
 # Failure modes
 
 Common ways things break, grouped by symptom.
+
+### MPPScan warning: «Fixed-price endpoint missing WWW-Authenticate header on 402»
+
+MPPScan probes the endpoint with an empty request and expects 402 with `WWW-Authenticate: Payment ...` before reading any params. If validation runs first and returns 400, MPPScan can't auto-discover pricing and shows this warning.
+
+Fix: in `app/api/service/route.ts`, ensure `mppx.charge()` runs **before** any input validation. The first block of the handler should be:
+
+```ts
+const charge = mppx.charge({ amount: PRICE })
+const result = await charge(request)
+if (result.status === 402) return result.challenge
+```
+
+Validation comes after, and error responses wrap with `result.withReceipt(...)` so paying clients get proof of payment even when the body is malformed.
+
+### Payment fails with `InsufficientBalance` even when wallet has funds
+
+The `amount` passed to `mppx.charge()` is being treated as a number that's too large. This happens when code passes base units (e.g. `'10000'` for $0.01) instead of a decimal string. The `mppx.charge()` API takes a **decimal string in token units**, not base units — `'0.01'` is one cent, not `'10000'`. The library handles the 6-decimal conversion internally.
+
+Quick check:
+```bash
+curl -i 'https://<PROD_URL>/api/service?q=test' | grep -i www-authenticate
+```
+
+If the `amount` in the 402 challenge has many more zeros than expected (e.g. `10000000000` instead of `10000` for one cent), the route handler is passing base units to `mppx.charge`. Fix `lib/mpp.ts`:
+
+```ts
+// WRONG — passes base units
+export const PRICE = process.env.PRICE || '10000'
+
+// RIGHT — passes decimal token amount
+export const PRICE = process.env.PRICE || '0.01'
+```
+
+The openapi.json route still emits base units (per the MPP discovery spec), but converts them from the same `PRICE` decimal — never store base units in env directly.
 
 ### Build fails with `Cannot find module 'mppx/nextjs'`
 
