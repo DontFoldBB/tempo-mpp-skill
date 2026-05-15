@@ -1,6 +1,6 @@
 # Tempo MPP Builder
 
-Sets up a paid HTTP service on the Tempo blockchain end-to-end: scaffolds a Next.js project, wires up MPP payment middleware, deploys to Vercel with a custom domain, and registers on MPPScan so AI agents can discover it.
+Sets up a paid HTTP service on the Tempo blockchain end-to-end: scaffolds a Next.js project, wires up MPP payment middleware, deploys to Vercel, and registers on MPPScan so AI agents can discover it.
 
 Invoke this skill with:
 
@@ -17,11 +17,34 @@ The assistant operates as a **build orchestrator**, not a tutor — it makes dec
 The orchestrator follows these throughout:
 
 - **Russian for the human, English in code.** Comments, variables, error strings — English. Anything addressed to the user — Russian. Technical nouns (Vercel, env, MPP, USDC.e, RPC, bridge) stay as they are.
-- **Talk in completed states, not commentary.** After finishing a phase, the orchestrator says what now exists, not what it just did. Example: «Проект готов, зависимости установлены» — not «Я запустил create-next-app и потом npm install».
+- **Announce each step before doing it.** Before starting a meaningful step (asking for input, running install, deploying, etc.), print a Russian step header like `📍 Шаг 1. Выбор идеи сервиса` followed by a one-line explanation of what's about to happen. This gives the user a clear sense of progress through the build. Don't announce trivial bookkeeping (file moves, single commands), only logical sub-steps.
+- **Talk in completed states, not commentary.** After finishing a step, the orchestrator says what now exists, not what it just did. Example: «Проект готов, зависимости установлены» — not «Я запустил create-next-app и потом npm install».
+- **When asking for input, remind where to get it.** If the value was set up earlier in the user's guide (Tempo address, project path), explicitly reference that step: «Вставь Tempo-адрес который ты создал на Шаге 4 гайда (wallet.tempo.xyz)». Don't assume the user remembers.
 - **One question at a time.** If multiple inputs are needed, ask sequentially. No bulk forms.
 - **Quote real values back to the user.** When confirming an address, price, or path — show the exact string the orchestrator captured, so the user can spot a typo.
-- **Defer all spending decisions.** No `vercel --prod`, no actual mppx CLI payments, no DNS changes — without an explicit «да / делай / поехали» from the user in the immediately preceding turn.
+- **Defer all spending decisions.** No `vercel --prod`, no actual mppx CLI payments — without an explicit «да / делай / поехали» from the user in the immediately preceding turn.
 - **On error, switch to diagnostic mode.** If a command fails, the next message describes what failed in one or two lines and asks how to proceed (retry, skip, abort) — it does NOT silently rerun.
+
+### Step naming scheme
+
+Internal phase codes (A1, B2, D3, E1...) are for orchestrator memory only — never shown to the user. When announcing a step, translate to a friendly Russian name with sequential numbering starting from 1. The skill has its own step numbering independent of the published guide.
+
+| Internal | What to announce to user |
+| --- | --- |
+| A1 | (skip — silent environment check) |
+| A2 | 📍 Шаг 1. Выбор идеи сервиса |
+| A3 | 📍 Шаг 2. Tempo-адрес для платежей |
+| A4 | 📍 Шаг 3. Путь к папке проекта |
+| B1–B6 | 📍 Шаг 4. Сборка проекта (одно общее сообщение в начале, без подшагов) |
+| C | 📍 Шаг 5. Локальная проверка |
+| D1–D4 | 📍 Шаг 6. Деплой на Vercel |
+| E1 | (auto — prints summary) |
+| E2 | 📍 Шаг 7. Что делаем дальше |
+| E3 | 📍 Шаг 8. Реальный тест платежа |
+| E4 | 📍 Шаг 8. Регистрация на MPPScan |
+| E5 | 📍 Готово |
+
+When asking for data the user prepared before launching the skill (Tempo address, project path), don't reference external "step numbers" — just remind where the value comes from in plain words ("адрес кошелька с wallet.tempo.xyz", "папка которую ты создал перед запуском Claude Code").
 
 ## Passing data between commands
 
@@ -42,7 +65,6 @@ SLUG=${SLUG:-}
 PRICE_UNITS=${PRICE_UNITS:-}
 SECRET=${SECRET:-}
 PROD_URL=${PROD_URL:-}
-DOMAIN=${DOMAIN:-}
 EOF
 ```
 
@@ -73,16 +95,20 @@ Pull the idea catalog so concrete templates are available later:
 curl -fsSL https://raw.githubusercontent.com/DontFoldBB/tempo-mpp-skill/main/docs/idea-templates.md -o /tmp/mpp-ideas.md
 ```
 
-Then ask the user:
+Then announce the step and ask the user (use this exact format):
 
-> Что будем делать?
+> 📍 **Шаг 1. Выбор идеи сервиса**
 >
-> A. Token Info ($0.01) — метаданные TIP-20 токена
-> B. Price Feed ($0.01) — цены всех стейблов через CoinGecko
-> C. Gas Estimator ($0.005) — оценка газа на Tempo
-> D. Activity Score ($0.01) — оценка активности кошелька
-> E. Random Stable Fact ($0.005) — простейший вариант для первого захода
-> F. Своя идея — опиши что принимает на вход и что возвращает
+> Сейчас выберем что именно будет делать твой MPP-сервис. Есть пять готовых вариантов с уже написанным кодом, можно взять любой. Каждый агент будет платить указанную цену в USDC.e за один вызов.
+>
+> **A. Token Info — $0.01** — агент шлёт адрес TIP-20 токена, получает метаданные (символ, decimals, total supply)
+> **B. Price Feed — $0.01** — текущие цены всех Tempo-стейблов через CoinGecko
+> **C. Gas Estimator — $0.005** — оценка стоимости газа на Tempo для разных операций
+> **D. Activity Score — $0.01** — простой скор активности кошелька от 0 до 100
+> **E. Random Stable Fact — $0.005** — случайные факты про стейблкоины. Самый простой вариант если делаешь в первый раз
+> **F. Своя идея** — опиши что принимает и что возвращает, адаптирую ближайший шаблон
+>
+> Какую делаем? (буква или название)
 
 Map free-form answers loosely (e.g. «цены» → B, «гайз» → C). If F, ask follow-up: «Что принимает на вход и что возвращает?» — then pick the template closest in spirit and adapt.
 
@@ -96,13 +122,13 @@ Once captured, confirm to the user in one line what's queued up.
 
 ## A3. Recipient address
 
-Ask:
+Announce and ask:
 
-> Нужен Tempo-адрес который будет получать платежи. Не используй фарминговый кошелёк — заведи отдельный.
+> 📍 **Шаг 2. Tempo-адрес для платежей**
 >
-> 1) wallet.tempo.xyz → создать через passkey
-> 2) Скопируй адрес сверху (0x... 42 символа)
-> 3) Пришли мне сюда
+> Нужен адрес Tempo-кошелька на который будут приходить платежи от агентов. Используй тот, который ты создал на wallet.tempo.xyz через passkey (Touch ID, Windows Hello, отпечаток на телефоне).
+>
+> Адрес начинается с `0x` и состоит из 42 символов. Вставь его сюда:
 
 Validate the answer with `^0x[a-fA-F0-9]{40}$`. If invalid, point out what's wrong (length, prefix, non-hex char) and ask again. Save lowercase variant as `RECIPIENT`.
 
@@ -110,9 +136,15 @@ Confirm by echoing the address back.
 
 ## A4. Project location
 
-Ask:
+Announce and ask:
 
-> Куда положить проект? Полный путь к новой папке.
+> 📍 **Шаг 3. Путь к папке проекта**
+>
+> Куда положить код. Это должна быть пустая папка которую ты создал перед запуском Claude Code.
+>
+> Полный путь, например:
+> - macOS: `/Users/твоё_имя/Documents/tempo-mpp`
+> - Windows: `C:\Users\твоё_имя\Documents\tempo-mpp`
 
 Don't create anything yet — first check for capital letters in the final path segment. npm's `create-next-app` rejects them as project name. If found, tell the user the workaround:
 
@@ -123,6 +155,12 @@ Save `PROJECT_DIR` (the user's chosen path, where files will live after the move
 ---
 
 # Phase B — Local build
+
+Before starting, announce to the user:
+
+> 📍 **Шаг 4. Сборка проекта**
+>
+> Получил все данные, запускаю сборку. Сейчас создам Next.js проект, поставлю зависимости, напишу код твоего сервиса, сгенерирую секрет и сделаю первый git-коммит. Это займёт пару минут, делаю всё сам, иногда буду спрашивать разрешение на команды — жми «yes» / «1».
 
 ## B1. Scaffolding
 
@@ -174,9 +212,6 @@ EOF
 cat > "$PROJECT_DIR/.env.example" <<'EOF'
 MPP_RECIPIENT=
 MPP_SECRET_KEY=
-# Set these after attaching a custom domain
-# NEXT_PUBLIC_BASE_URL=https://your-domain.xyz
-# MPP_REALM=your-domain.xyz
 EOF
 ```
 
@@ -302,14 +337,13 @@ Replace `buildResponse` with the body from `/tmp/mpp-ideas.md` matching `IDEA_KE
 
 MPPScan parses this file to register the service. Two requirements:
 1. `x-payment-info` must be a flat object — `{ intent, method, amount, currency, description }`. The nested `offers: [...]` form gets rejected.
-2. `servers[0].url` should be the canonical public URL. Use `NEXT_PUBLIC_BASE_URL` if set (after domain attached), otherwise fall back through Vercel's production URL and finally to localhost.
+2. `servers[0].url` should resolve to the Vercel production URL at runtime — use `VERCEL_PROJECT_PRODUCTION_URL` first, fall back to `VERCEL_URL`, then to localhost for dev.
 
 ```ts
 export const runtime = 'nodejs'
 
 export async function GET(_req?: Request): Promise<Response> {
   const baseUrl =
-    process.env.NEXT_PUBLIC_BASE_URL ||
     (process.env.VERCEL_PROJECT_PRODUCTION_URL && `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`) ||
     (process.env.VERCEL_URL && `https://${process.env.VERCEL_URL}`) ||
     'http://localhost:3000'
@@ -376,16 +410,23 @@ export default function Home() {
 
       <h3>Call (paid)</h3>
       <pre style={{ background: '#050505', padding: '1rem', border: '1px solid #2a2a2a', overflowX: 'auto' }}>
-        npx mppx 'https://YOUR_DOMAIN/api/service?q=example'
+        npx mppx 'https://{baseUrl}/api/service?q=example'
       </pre>
 
       <h3>Discovery (free)</h3>
       <pre style={{ background: '#050505', padding: '1rem', border: '1px solid #2a2a2a', overflowX: 'auto' }}>
-        curl 'https://YOUR_DOMAIN/openapi.json'
+        curl 'https://{baseUrl}/openapi.json'
       </pre>
     </main>
   )
 }
+```
+
+`baseUrl` resolves at build time from `process.env.VERCEL_PROJECT_PRODUCTION_URL` (set automatically by Vercel) — add this at the top of `page.tsx`:
+
+```tsx
+const SERVICE_NAME = 'MPP Service' // adjust per build
+const baseUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || 'localhost:3000'
 ```
 
 ### `vercel.json`
@@ -422,6 +463,12 @@ git commit -m "scaffold $SLUG"
 ---
 
 # Phase C — Local verification
+
+Announce to the user:
+
+> 📍 **Шаг 5. Локальная проверка**
+>
+> Перед деплоем на Vercel прогоню тесты локально — это быстрее чем итерировать через деплой. Запущу dev-сервер, проверю что 402 challenge возвращается правильно, что openapi.json валидный и т.д.
 
 Bring up the dev server and prove that the wiring is correct *before* burning a Vercel deployment.
 
@@ -479,6 +526,12 @@ Confirm to the user that local checks passed and ask whether to deploy.
 ---
 
 # Phase D — Deploy
+
+Announce to the user:
+
+> 📍 **Шаг 6. Деплой на Vercel**
+>
+> Локально всё работает. Сейчас залью на Vercel и пропишу env vars через CLI. Если ещё не залогинен в Vercel — откроется браузер для авторизации.
 
 ## D1. Vercel CLI
 
@@ -546,110 +599,233 @@ Same four checks as Phase C, but against `$PROD_URL`. If anything fails, it's al
 
 ---
 
-# Phase E — Custom domain
+# Phase E — Hand-off to user
 
-If the user is OK staying on `*.vercel.app`, skip this phase entirely. MPPScan accepts vercel.app URLs but the registry quality scoring favors custom domains.
+By this point the service is live. The remaining steps depend on what the user wants to do next.
 
-Ask which path:
+## E1. Result summary
 
-> Привязываем свой домен?
->
-> 1) Уже есть — назови
-> 2) Купить (porkbun.com или cloudflare.com — оба без верификации, $1–2 за `.xyz`)
-> 3) Пропустить
-
-For option 2, point to those two registrars and wait for the user to come back with a domain.
-
-When the user has a domain, walk through attachment without doing any DNS work yourself — the user has to set records on their registrar:
-
-1. Vercel Dashboard → project → Settings → Domains → Add → enter the domain
-2. Vercel shows the exact DNS records to add (typically an A record for the apex and a CNAME for www)
-3. On the registrar, add those records. **For Cloudflare specifically: proxy must be OFF** (grey cloud, not orange) — otherwise SSL issuance fails
-4. Wait 2–10 minutes for DNS propagation
-5. Vercel issues the SSL certificate automatically once DNS resolves correctly
-
-Wait for the user to confirm the domain is live, then verify:
-
-```bash
-nslookup "$DOMAIN" | tail -5
-curl -sI "https://$DOMAIN/" | head -3
-```
-
-Then add two more env vars and redeploy — without these, `openapi.json` keeps reporting the vercel.app URL, and MPPScan won't accept the registration. Same CLI flow as in D3, no dashboard needed:
-
-```bash
-cd "$PROJECT_DIR"
-
-# Remove if already set (from previous skill run on same project)
-vercel env rm NEXT_PUBLIC_BASE_URL production --yes 2>/dev/null
-vercel env rm NEXT_PUBLIC_BASE_URL preview --yes 2>/dev/null
-vercel env rm MPP_REALM production --yes 2>/dev/null
-vercel env rm MPP_REALM preview --yes 2>/dev/null
-
-# Add fresh values
-printf '%s' "https://$DOMAIN" | vercel env add NEXT_PUBLIC_BASE_URL production preview 2>&1 | tail -2
-printf '%s' "$DOMAIN"         | vercel env add MPP_REALM production preview 2>&1 | tail -2
-```
-
-Then redeploy so the new env values take effect:
-
-```bash
-vercel --prod 2>&1 | tail -5
-```
-
-Verify the canonical URL is now used:
-
-```bash
-curl -s "https://$DOMAIN/openapi.json" | node -e "
-  let s=''; process.stdin.on('data',d=>s+=d).on('end',()=>{
-    const d=JSON.parse(s);
-    console.log('servers[0].url =', d.servers?.[0]?.url);
-  });
-"
-```
-
-Should print `https://<DOMAIN>`.
-
----
-
-# Phase F — Register on MPPScan
-
-> Финал: регистрируем сервис чтоб агенты могли найти.
->
-> 1) Открой mppscan.com/register
-> 2) Service URL = `https://<DOMAIN>` (или vercel.app если пропустил Phase E)
-> 3) Жми Register — MPPScan сам прочитает `/openapi.json`
-> 4) Получишь URL вида `mppscan.com/server/<hash>` — пришли сюда
-
-After receiving the link, optionally verify it loads and then print the build summary:
+Print a comprehensive summary so the user can poke around and see their work. Use the actual values captured during the build, not placeholders.
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MPP-сервис готов
+Готово, MPP-сервис задеплоен
 
 Имя:           <SLUG>
-Цена:          $<PRICE_DISPLAY> USDC.e
-Live URL:      https://<DOMAIN>
-API endpoint:  https://<DOMAIN>/api/service
-Discovery:     https://<DOMAIN>/openapi.json
-MPPScan:       <USER_PROVIDED_LINK>
+Идея:          <SERVICE_IDEA в одну строку>
+Цена:          $<PRICE_DISPLAY> USDC.e за запрос
 Получатель:    <RECIPIENT>
-Проект:        <PROJECT_DIR>
 
-Полезное:
+Куда зайти посмотреть:
+
+  Главная страница (открой в браузере):
+    https://<PROD_URL>
+
+  OpenAPI документ (это читают агенты):
+    https://<PROD_URL>/openapi.json
+
+  Vercel Dashboard (живые логи каждого запроса):
+    https://vercel.com/dashboard
+
+  Tempo Explorer (входящие транзакции на твой адрес):
+    https://explore.tempo.xyz/address/<RECIPIENT>
+
+  Папка с кодом проекта на компе:
+    <PROJECT_DIR>
+
+Полезные команды (если захочешь править):
   cd <PROJECT_DIR>
   vercel --prod                                  # передеплоить после правок
-  npm run dev                                    # локально на :3000
-  npx mppx 'https://<DOMAIN>/api/service?q=...'  # реальный платный вызов
+  npm run dev                                    # локально на порту 3000
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Clean up:
+`PROD_URL` is the `*.vercel.app` URL captured after `vercel --prod` in D3.
+
+## E2. Choose next step
+
+Ask the user which path they want:
+
+> 📍 **Шаг 7. Что делаем дальше**
+>
+> Сервис уже задеплоен и работает. Можно зайти посмотреть результат по ссылкам выше. Дальше есть три варианта:
+>
+> 1) **Реальный тест платежа + регистрация на MPPScan.** Полный путь до конца. Создам тестовый кошелёк, ты бриджнёшь $0.50-1 USDC через Stargate, я сделаю первый платёж в твой сервис, потом зарегистрируем в каталоге. Самый кайфовый, рекомендую.
+>
+> 2) **Только регистрация на MPPScan.** Закинем сервис в каталог чтоб его могли найти агенты. Без теста платежа.
+>
+> 3) **Завершить.** Сервис уже работает, остальное сделаю позже сам.
+
+Branch on the answer:
+
+- 1 → go to E3 (Payment test), then automatically continue to E4 (MPPScan registration), then E5 (wrap up)
+- 2 → go to E4 (MPPScan), then E5
+- 3 → go to E5 (wrap up)
+
+## E3. Real payment test
+
+Announce to the user:
+
+> 📍 **Шаг 8. Реальный тест платежа**
+>
+> Сейчас сделаем первый настоящий платёж через твой сервис. Я создам тестовый кошелёк, ты закинешь в него немного USDC.e через Stargate, потом я этим тестовым кошельком оплачу запрос к твоему API. Деньги придут на твой recipient адрес.
+
+Create a fresh wallet for testing — separate from the recipient wallet. The user will fund this one and the assistant will use it to call the live service.
+
+```bash
+cd "$PROJECT_DIR"
+cat > test-payment.ts <<'EOF'
+import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts'
+import { Mppx, tempo } from 'mppx/client'
+
+async function main() {
+  const pk = generatePrivateKey()
+  const account = privateKeyToAccount(pk)
+  console.log('TEST_PRIVATE_KEY:', pk)
+  console.log('TEST_ADDRESS:', account.address)
+}
+main()
+EOF
+
+npx tsx test-payment.ts 2>&1 | tail -5
+```
+
+Capture `TEST_ADDRESS` from output. Tell the user:
+
+> Создал тестовый кошелёк: `<TEST_ADDRESS>`
+>
+> Теперь надо закинуть туда немного USDC.e в сеть Tempo. Идём на Stargate:
+>
+> https://stargate.finance/?dstChain=tempo&dstToken=0x20c000000000000000000000b9537d11c60e8b50
+>
+> 1) Подключи свой обычный EVM кошелёк (MetaMask / Rabby) с USDC на любой сети
+> 2) В поле "To Address" вставь: `<TEST_ADDRESS>`
+> 3) Сумма: $0.50-1 USDC. Меньше нет смысла, потому что Stargate берёт минимум $0.20-0.30 комиссии за бридж независимо от суммы
+> 4) Подтверди транзакцию в своём кошельке
+> 5) Когда деньги придут (1-3 минуты), напиши «готово»
+
+Wait. When user confirms, verify balance:
+
+```bash
+node -e "
+const { createPublicClient, http } = require('viem')
+const { defineChain } = require('viem')
+const tempo = defineChain({
+  id: 4217, name: 'Tempo',
+  nativeCurrency: { name: 'USD', symbol: 'USD', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc.tempo.xyz'] } }
+})
+const client = createPublicClient({ chain: tempo, transport: http() })
+const USDC_E = '0x20c000000000000000000000b9537d11c60e8b50'
+const ABI = [{ name: 'balanceOf', type: 'function', stateMutability: 'view', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }] }]
+client.readContract({ address: USDC_E, abi: ABI, functionName: 'balanceOf', args: ['$TEST_ADDRESS'] })
+  .then(b => console.log('balance:', Number(b) / 1e6, 'USDC.e'))
+  .catch(e => console.error('error:', e.message))
+"
+```
+
+If balance is 0 — bridge not done yet, ask user to wait another minute and check Stargate status. If non-zero — proceed.
+
+Make the actual paid call using the test wallet:
+
+```bash
+cat > test-call.ts <<EOF
+import { privateKeyToAccount } from 'viem/accounts'
+import { Mppx, tempo } from 'mppx/client'
+
+async function main() {
+  const account = privateKeyToAccount('TEST_PK_HERE' as \`0x\${string}\`)
+  const mppx = Mppx.create({ methods: [tempo.charge({ account })] })
+  const url = 'https://<PROD_URL>/api/service?q=test-value'
+  const res = await mppx.fetch(url)
+  const data = await res.json()
+  console.log('STATUS:', res.status)
+  console.log('DATA:', JSON.stringify(data, null, 2))
+}
+main()
+EOF
+
+# Substitute the captured private key in the file, then run
+sed -i.bak "s|TEST_PK_HERE|$TEST_PK|" test-call.ts
+npx tsx test-call.ts 2>&1 | tail -30
+```
+
+Adjust the query parameter (`q=test-value`) to whatever is valid for the chosen idea — e.g. an address for Activity Score, a token for Token Info.
+
+Show the response to the user and explain:
+
+> 🎉 Платёж прошёл, агент получил ответ от твоего сервиса.
+>
+> Что произошло:
+> 1. Тестовый кошелёк (`<TEST_ADDRESS>`) заплатил $<PRICE_DISPLAY> USDC.e
+> 2. Деньги пришли на твой recipient `<RECIPIENT>`
+> 3. Сервис вернул JSON ответ (выше)
+>
+> Где это видно прямо сейчас:
+> - Explorer: https://explore.tempo.xyz/address/<RECIPIENT> (последняя входящая транза)
+> - Vercel Logs: https://vercel.com/dashboard (запрос с 200 ответом)
+> - MPPScan (если зарегистрировал): на странице сервиса в Transactions
+
+Clean up test files (they contain a private key):
+
+```bash
+rm -f test-payment.ts test-call.ts test-call.ts.bak
+```
+
+After cleanup, proceed directly to E4 (MPPScan registration). Don't return to E2 menu — payment test naturally leads into listing the service in the catalog. Just announce the next step and continue:
+
+> Платёж прошёл, сервис подтверждённо работает. Теперь самое время зарегистрировать его в каталоге MPPScan чтобы агенты могли найти автоматически.
+
+Then continue with the E4 flow below.
+
+## E4. MPPScan registration
+
+> 📍 **Шаг 8. Регистрация на MPPScan**
+>
+> Закидываем сервис в каталог MPPScan чтоб агенты могли его найти автоматически. Это бесплатно, без модерации, один клик.
+>
+> 1) Открой https://mppscan.com/register
+> 2) В поле Service URL введи: `https://<PROD_URL>` (это твой vercel.app URL)
+> 3) Жми **Register**
+> 4) MPPScan сам прочитает твой `/openapi.json`, увидит все эндпоинты и цены, сделает запись в каталоге
+> 5) Получишь страницу вида `mppscan.com/server/<hash>` — это твоя карточка. Пришли её ссылку сюда, чтоб я добавил в саммари
+
+Wait for the link. Verify it's a valid mppscan URL with `grep -qE '^https://(www\.)?mppscan\.com/server/[a-f0-9]+'`. If yes, save into the session as `MPPSCAN_URL`.
+
+> ✅ Зарегистрировано. Твоя карточка: <MPPSCAN_URL>
+>
+> Теперь агенты могут найти сервис через каталог. На странице видны:
+> - все эндпоинты и цены
+> - все транзакции (история платежей)
+> - статус сервиса (отвечает / не отвечает)
+
+Continue to E5 (final wrap-up).
+
+## E5. Wrap up
+
+Print final reminder of where everything lives:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Всё, готово.
+
+Сайт:       https://<PROD_URL>
+Получатель: <RECIPIENT>
+MPPScan:    <MPPSCAN_URL or "не зарегистрирован">
+Код:        <PROJECT_DIR>
+
+Если захочешь править сервис — открой <PROJECT_DIR>,
+правь файлы, потом `vercel --prod` для деплоя.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+Clean up the session file:
 
 ```bash
 rm -f "$HOME/.mpp-build.session"
 ```
 
-End the build with a single line: `MPP_BUILD_DONE`. Downstream tooling looks for this exact string.
+End with a single line: `MPP_BUILD_DONE`. Downstream tooling looks for this exact string.
 
 ---
 
@@ -698,10 +874,6 @@ vercel env ls production | grep -E 'MPP_RECIPIENT|MPP_SECRET_KEY'
 ```
 
 If either is missing, add via `vercel env add NAME production preview` (with the value piped via stdin). Then `vercel --prod` to pick them up.
-
-### `openapi.json` keeps reporting the vercel.app URL after attaching a domain
-
-`NEXT_PUBLIC_BASE_URL` not set in production env vars, or set but not deployed yet. Verify with `vercel env ls production | grep NEXT_PUBLIC_BASE_URL`. If missing, add via `vercel env add NEXT_PUBLIC_BASE_URL production preview` (pipe `https://your-domain` via stdin), then `vercel --prod`.
 
 ### `mppx account create` fails with «Unsupported platform: win32»
 
