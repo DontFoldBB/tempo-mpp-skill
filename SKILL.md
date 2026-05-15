@@ -499,16 +499,39 @@ After the command finishes, capture the URL it prints (`https://<slug>-<hash>.ve
 
 ## D3. Env vars
 
-Until the user adds production env vars, deployments crash on the recipient check in `lib/mpp.ts`.
+`MPP_RECIPIENT` and `MPP_SECRET_KEY` must exist in Vercel production env before `vercel --prod` succeeds — otherwise the recipient validation in `lib/mpp.ts` throws at module load and the deploy crashes.
 
-> Открой dashboard.vercel.com → проект → **Settings → Environment Variables**. Добавь две переменные на Production и Preview:
->
->   `MPP_RECIPIENT` = `<RECIPIENT>`
->   `MPP_SECRET_KEY` = `<SECRET>`
->
-> Когда добавишь — напиши «готово».
+These can be added entirely via CLI, no dashboard visit required. `vercel env add` accepts the variable name and target environments as args, then reads the value from stdin:
 
-Wait for confirmation. Then:
+```bash
+cd "$PROJECT_DIR"
+
+# Pipe values via stdin to avoid interactive prompts
+printf '%s' "$RECIPIENT" | vercel env add MPP_RECIPIENT production preview 2>&1 | tail -3
+printf '%s' "$SECRET"    | vercel env add MPP_SECRET_KEY production preview 2>&1 | tail -3
+```
+
+If either command fails because the variable already exists (the user re-ran the skill in the same project), remove first then re-add:
+
+```bash
+vercel env rm MPP_RECIPIENT production --yes 2>/dev/null
+vercel env rm MPP_RECIPIENT preview --yes 2>/dev/null
+printf '%s' "$RECIPIENT" | vercel env add MPP_RECIPIENT production preview
+```
+
+Same pattern for `MPP_SECRET_KEY`.
+
+Verify both are now set:
+
+```bash
+vercel env ls production 2>&1 | grep -E 'MPP_RECIPIENT|MPP_SECRET_KEY'
+```
+
+Should print both names.
+
+Quickly explain to the user what was just done — they didn't see the secret values, so a one-liner acknowledging that env is set on Production+Preview is enough. No need to ask them to confirm anything in the dashboard.
+
+Now trigger the production deploy with the new env values:
 
 ```bash
 cd "$PROJECT_DIR"
@@ -552,19 +575,25 @@ nslookup "$DOMAIN" | tail -5
 curl -sI "https://$DOMAIN/" | head -3
 ```
 
-Then ask the user to add two more env vars and redeploy — without these, `openapi.json` keeps reporting the vercel.app URL, and MPPScan won't accept the registration:
-
-> Ещё две переменные на Production и Preview:
->
->   `NEXT_PUBLIC_BASE_URL` = `https://<DOMAIN>`
->   `MPP_REALM` = `<DOMAIN>` (без https://)
->
-> Когда добавишь — пиши.
-
-After confirmation:
+Then add two more env vars and redeploy — without these, `openapi.json` keeps reporting the vercel.app URL, and MPPScan won't accept the registration. Same CLI flow as in D3, no dashboard needed:
 
 ```bash
 cd "$PROJECT_DIR"
+
+# Remove if already set (from previous skill run on same project)
+vercel env rm NEXT_PUBLIC_BASE_URL production --yes 2>/dev/null
+vercel env rm NEXT_PUBLIC_BASE_URL preview --yes 2>/dev/null
+vercel env rm MPP_REALM production --yes 2>/dev/null
+vercel env rm MPP_REALM preview --yes 2>/dev/null
+
+# Add fresh values
+printf '%s' "https://$DOMAIN" | vercel env add NEXT_PUBLIC_BASE_URL production preview 2>&1 | tail -2
+printf '%s' "$DOMAIN"         | vercel env add MPP_REALM production preview 2>&1 | tail -2
+```
+
+Then redeploy so the new env values take effect:
+
+```bash
 vercel --prod 2>&1 | tail -5
 ```
 
@@ -662,15 +691,17 @@ The payment middleware isn't engaging. Most likely causes, in order of probabili
 
 ### Production endpoint returns 500 after deploy
 
-Almost always env vars. The dashboard has separate scopes for Production, Preview, and Development — make sure all three checkboxes are ticked when adding `MPP_RECIPIENT` and `MPP_SECRET_KEY`.
+Almost always env vars. Verify both are present in production scope:
 
-### Custom domain stuck on «Issuing certificate»
+```bash
+vercel env ls production | grep -E 'MPP_RECIPIENT|MPP_SECRET_KEY'
+```
 
-DNS not resolving to Vercel's IPs yet, or Cloudflare proxy is on. Check `nslookup <domain>` — if it returns Cloudflare IPs instead of `216.198.79.1` (or the A record Vercel showed), the orange-cloud proxy is enabled. Disable it in the Cloudflare DNS settings.
+If either is missing, add via `vercel env add NAME production preview` (with the value piped via stdin). Then `vercel --prod` to pick them up.
 
 ### `openapi.json` keeps reporting the vercel.app URL after attaching a domain
 
-`NEXT_PUBLIC_BASE_URL` not set in production env vars, or set but not deployed yet. Add it on the Environment Variables page and run `vercel --prod` once.
+`NEXT_PUBLIC_BASE_URL` not set in production env vars, or set but not deployed yet. Verify with `vercel env ls production | grep NEXT_PUBLIC_BASE_URL`. If missing, add via `vercel env add NEXT_PUBLIC_BASE_URL production preview` (pipe `https://your-domain` via stdin), then `vercel --prod`.
 
 ### `mppx account create` fails with «Unsupported platform: win32»
 
