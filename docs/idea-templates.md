@@ -2,11 +2,11 @@
 
 Этот файл читается агентом на Шаге 1 SKILL.md. Под выбранную пользователем идею агент подставляет соответствующую функцию `buildResponse()` плюс при необходимости меняет имя параметра запроса (например, `q` → `address`, `q` → `token`).
 
-Все цены указаны в USDC.e (6 decimals): `10000` = $0.01, `5000` = $0.005, `20000` = $0.02.
+Все цены указаны в USDC.e как decimal string для `PRICE` env var: `'0.01'` = один цент, `'0.005'` = полцента, `'0.02'` = два цента. Это значение прокидывается в `mppx.charge({ amount: PRICE })` без дополнительной конвертации — библиотека сама знает что USDC.e имеет 6 decimals.
 
 ---
 
-## 1. Token Info ($0.01, base units `10000`)
+## 1. Token Info ($0.01, PRICE = '0.01')
 
 **Что делает:** принимает адрес TIP-20 токена, возвращает метаданные (symbol, name, decimals, total supply, contract).
 
@@ -77,7 +77,7 @@ async function buildResponse(input: string): Promise<object> {
 
 ---
 
-## 2. Price Feed ($0.01, base units `10000`)
+## 2. Price Feed ($0.01, PRICE = '0.01')
 
 **Что делает:** возвращает текущие USD цены всех известных Tempo-стейблов через CoinGecko (бесплатное API, ~10 req/min лимит).
 
@@ -147,7 +147,7 @@ async function buildResponse(_input: string): Promise<object> {
 
 ---
 
-## 3. Gas Estimator ($0.005, base units `5000`)
+## 3. Gas Estimator ($0.005, PRICE = '0.005')
 
 **Что делает:** возвращает текущую оценку газа на Tempo для разных типов операций.
 
@@ -213,7 +213,7 @@ async function buildResponse(_input: string): Promise<object> {
 
 ---
 
-## 4. Activity Score ($0.01, base units `10000`)
+## 4. Activity Score ($0.01, PRICE = '0.01')
 
 **Что делает:** простой скор активности кошелька от 0 до 100 на основе количества транзакций и баланса.
 
@@ -303,7 +303,7 @@ async function buildResponse(input: string): Promise<object> {
 
 ---
 
-## 5. Random Stable Fact ($0.005, base units `5000`)
+## 5. Random Stable Fact ($0.005, PRICE = '0.005')
 
 **Что делает:** возвращает случайный факт про стейблкоины. Самый простой вариант для первого MPP-сервиса.
 
