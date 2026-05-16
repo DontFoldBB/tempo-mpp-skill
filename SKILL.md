@@ -42,6 +42,7 @@ Internal phase codes (A1, B2, D3, E1...) are for orchestrator memory only — ne
 | E2 | 📍 Шаг 7. Что делаем дальше |
 | E3 | 📍 Шаг 8. Реальный тест платежа |
 | E4 | 📍 Шаг 8. Регистрация на MPPScan |
+| E4.5 | 📍 Шаг 8. Контрольный платёж через каталог |
 | E5 | 📍 Готово |
 
 When asking for data the user prepared before launching the skill (Tempo address, project path), don't reference external "step numbers" — just remind where the value comes from in plain words ("адрес кошелька с wallet.tempo.xyz", "папка которую ты создал перед запуском Claude Code").
@@ -672,9 +673,9 @@ Ask the user which path they want:
 
 Branch on the answer:
 
-- 1 → go to E3 (Payment test), then automatically continue to E4 (MPPScan registration), then E5 (wrap up)
-- 2 → go to E4 (MPPScan), then E5
-- 3 → go to E5 (wrap up)
+- 1 → E3 (payment test) → E4 (MPPScan) → E4.5 (second payment) → E5 (wrap up)
+- 2 → E4 (MPPScan) → E5 (wrap up) — no test wallet, so E4.5 is skipped
+- 3 → E5 (wrap up)
 
 ## E3. Real payment test
 
@@ -778,19 +779,93 @@ Show the response to the user and explain:
 > Где это видно прямо сейчас:
 > - Explorer: https://explore.tempo.xyz/address/<RECIPIENT> (последняя входящая транза)
 > - Vercel Logs: https://vercel.com/dashboard (запрос с 200 ответом)
-> - MPPScan (если зарегистрировал): на странице сервиса в Transactions
 
-Before deleting the test wallet files, sweep remaining balance back to the recipient — otherwise that $0.40+ is locked forever (test private key gets deleted). On Tempo gas is paid in stablecoins, so we send `balance - small reserve` to cover the transfer fee itself.
+Keep the test wallet alive — it still has balance and will be reused in E4.5 for a second payment after MPPScan registration. Do NOT sweep or delete test files yet. Keep `test-call.ts` and the `TEST_PK` value in the session.
 
-Tell the user:
+Proceed directly to E4 (MPPScan registration). Announce:
 
-> На тестовом кошельке ещё остались деньги ($0.40-0.90 после теста). Сейчас переведу их на твой основной recipient адрес, чтоб не потерялись.
+> Платёж прошёл, сервис работает. Теперь зарегистрируем его в каталоге MPPScan чтобы агенты могли найти автоматически. Тестовый кошелёк не трогаю — после регистрации сделаем с него ещё один платёж, чтобы он засветился в каталоге.
+
+Then continue with the E4 flow below.
+
+## E4. MPPScan registration
+
+> 📍 **Шаг 8. Регистрация на MPPScan**
+>
+> Закидываем сервис в каталог MPPScan чтоб агенты могли его найти автоматически. Это бесплатно, без модерации, один клик.
+>
+> 1) Открой https://mppscan.com/register
+> 2) В поле Service URL введи: `https://<PROD_URL>` (это твой vercel.app URL)
+> 3) Жми **+ Add Server**
+> 4) MPPScan сам прочитает твой `/openapi.json`, увидит все эндпоинты и цены, сделает запись в каталоге
+> 5) Получишь страницу вида `mppscan.com/server/<hash>` — это твоя карточка. Пришли её ссылку сюда
+
+Wait for the link. Verify it's a valid mppscan URL with `grep -qE '^https://(www\.)?mppscan\.com/server/[a-f0-9]+'`. If yes, save into the session as `MPPSCAN_URL`.
+
+> ✅ Зарегистрировано. Твоя карточка: <MPPSCAN_URL>
+>
+> Теперь агенты могут найти сервис через каталог. На странице видны все эндпоинты, цены, история транзакций и статус сервиса.
+
+If the user came through E3 (the test wallet exists and has balance) → proceed to E4.5. If they came straight from E2 option 2 (no test wallet) → skip E4.5 and go to E5.
+
+## E4.5. Second payment (post-listing verification)
+
+Now that the service is listed, make one more paid call so a transaction appears on the MPPScan service page — this confirms to the user (and to anyone browsing the catalog) that the listed service genuinely works.
+
+Reuse the test wallet from E3 — it still has balance. Announce:
+
+> Сделаю ещё один платёж с тестового кошелька — теперь когда сервис в каталоге, эта транзакция появится прямо на странице MPPScan, в разделе Transactions. Так видно что листинг живой и сервис реально принимает платежи.
+
+First check the test wallet still has enough balance:
+
+```bash
+cd "$PROJECT_DIR"
+node -e "
+const { createPublicClient, http, defineChain } = require('viem')
+const tempo = defineChain({
+  id: 4217, name: 'Tempo',
+  nativeCurrency: { name: 'USD', symbol: 'USD', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc.tempo.xyz'] } }
+})
+const client = createPublicClient({ chain: tempo, transport: http() })
+const USDC_E = '0x20c000000000000000000000b9537d11c60e8b50'
+const ABI = [{ name: 'balanceOf', type: 'function', stateMutability: 'view', inputs: [{ name: 'a', type: 'address' }], outputs: [{ type: 'uint256' }] }]
+client.readContract({ address: USDC_E, abi: ABI, functionName: 'balanceOf', args: ['$TEST_ADDRESS'] })
+  .then(b => console.log('test wallet balance:', Number(b) / 1e6, 'USDC.e'))
+  .catch(e => console.error('error:', e.message))
+"
+```
+
+If balance covers price + gas (roughly `PRICE + $0.005`), reuse `test-call.ts` from E3 and run it again:
+
+```bash
+cd "$PROJECT_DIR"
+npx tsx test-call.ts 2>&1 | tail -20
+```
+
+Show the user the result and tell them:
+
+> Второй платёж прошёл. Открой свою страницу на MPPScan (<MPPSCAN_URL>) и глянь раздел Transactions — там теперь видна эта транзакция. Сервис официально в каталоге и принимает платежи.
+
+If balance is too low for a second call, don't block — just tell the user:
+
+> На тестовом кошельке не хватает на второй платёж. Это не страшно, сервис уже зарегистрирован и работает. Если захочешь — можешь позже сам вызвать его через `npx mppx`.
+
+Proceed to E5.
+
+## E5. Wrap up
+
+First, sweep any remaining balance from the test wallet back to the recipient — otherwise it's locked forever once the private key is deleted. On Tempo gas is paid in stablecoins, so send `balance - small reserve`.
+
+Announce:
+
+> Остаток с тестового кошелька переведу на твой основной recipient адрес, чтоб не потерялся.
 
 ```bash
 cd "$PROJECT_DIR"
 cat > sweep-test.ts <<EOF
 import { privateKeyToAccount } from 'viem/accounts'
-import { createWalletClient, createPublicClient, http, parseAbi, encodeFunctionData } from 'viem'
+import { createWalletClient, createPublicClient, http, parseAbi } from 'viem'
 import { defineChain } from 'viem'
 
 const tempo = defineChain({
@@ -818,17 +893,10 @@ async function main() {
   }) as bigint
   console.log('Balance on test wallet:', Number(balance) / 1e6, 'USDC.e')
 
-  if (balance === 0n) {
-    console.log('Nothing to sweep')
-    return
-  }
+  if (balance === 0n) { console.log('Nothing to sweep'); return }
 
-  // Reserve a small amount for gas on Tempo (~$0.005 in USDC.e base units = 5000)
-  const GAS_RESERVE = 5000n
-  if (balance <= GAS_RESERVE) {
-    console.log('Balance too small to sweep (would not cover gas)')
-    return
-  }
+  const GAS_RESERVE = 5000n // ~$0.005 in USDC.e base units
+  if (balance <= GAS_RESERVE) { console.log('Balance too small to sweep'); return }
   const sendAmount = balance - GAS_RESERVE
 
   const hash = await walletClient.writeContract({
@@ -846,52 +914,21 @@ sed -i.bak "s|RECIPIENT_HERE|$RECIPIENT|" sweep-test.ts
 npx tsx sweep-test.ts 2>&1 | tail -10
 ```
 
-If sweep succeeds, tell the user:
+If sweep succeeds:
 
-> Перевёл оставшиеся средства на твой recipient `<RECIPIENT>`. Tx: `<sweep_hash>`. Можешь проверить в explorer.
+> Перевёл остаток на твой recipient `<RECIPIENT>`. Tx: `<sweep_hash>`.
 
-If sweep fails (RPC issue, gas problem) — don't block the flow, just tell the user:
+If sweep fails or balance too small — don't block:
 
-> Sweep не получилось ($<balance> остались на тестовом кошельке). Если хочешь их забрать позже, приватный ключ был: `<TEST_PK>`. Сохрани в надёжное место. Иначе они там и зависнут.
+> Остаток забрать не вышло ($<balance> на тестовом кошельке). Если хочешь забрать позже — приватный ключ был `<TEST_PK>`, сохрани его. Иначе мелочь там и зависнет.
 
-Now clean up test files (they contain a private key):
+Clean up all test files (they contain a private key):
 
 ```bash
 rm -f test-payment.ts test-call.ts test-call.ts.bak sweep-test.ts sweep-test.ts.bak
 ```
 
-After cleanup, proceed directly to E4 (MPPScan registration). Don't return to E2 menu — payment test naturally leads into listing the service in the catalog. Just announce the next step and continue:
-
-> Платёж прошёл, остаток вернул, теперь самое время зарегистрировать сервис в каталоге MPPScan чтобы агенты могли найти автоматически.
-
-Then continue with the E4 flow below.
-
-## E4. MPPScan registration
-
-> 📍 **Шаг 8. Регистрация на MPPScan**
->
-> Закидываем сервис в каталог MPPScan чтоб агенты могли его найти автоматически. Это бесплатно, без модерации, один клик.
->
-> 1) Открой https://mppscan.com/register
-> 2) В поле Service URL введи: `https://<PROD_URL>` (это твой vercel.app URL)
-> 3) Жми **+ Add Server**
-> 4) MPPScan сам прочитает твой `/openapi.json`, увидит все эндпоинты и цены, сделает запись в каталоге
-> 5) Получишь страницу вида `mppscan.com/server/<hash>` — это твоя карточка. Пришли её ссылку сюда, чтоб я добавил в саммари
-
-Wait for the link. Verify it's a valid mppscan URL with `grep -qE '^https://(www\.)?mppscan\.com/server/[a-f0-9]+'`. If yes, save into the session as `MPPSCAN_URL`.
-
-> ✅ Зарегистрировано. Твоя карточка: <MPPSCAN_URL>
->
-> Теперь агенты могут найти сервис через каталог. На странице видны:
-> - все эндпоинты и цены
-> - все транзакции (история платежей)
-> - статус сервиса (отвечает / не отвечает)
-
-Continue to E5 (final wrap-up).
-
-## E5. Wrap up
-
-Print final reminder of where everything lives:
+Print final summary:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
